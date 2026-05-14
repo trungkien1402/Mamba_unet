@@ -32,10 +32,10 @@ DEPTHS= [2, 2, 2, 1]
 EMBED_DIM= 32
 
 CHECKPOINT_PATH = "checkpoints/20260305_205950/best.pth"
-TEST_IMAGE_PATH = "./21.JPG"
+TEST_IMAGE_PATH = "./h4.jpg"
 
-SAVE_MASK_PATH    = "prediction_mask10.png"
-SAVE_OVERLAY_PATH = "prediction_overlay10.png"
+SAVE_MASK_PATH    = "prediction_maskh4.png"
+SAVE_OVERLAY_PATH = "prediction_overlayh4.png"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

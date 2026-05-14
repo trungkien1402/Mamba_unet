@@ -12,7 +12,6 @@ import random
 class ToothDataset(Dataset):
 
     def __init__(self, root_dir, split="train", img_size=512, augment=True):
-
         self.root_dir = root_dir
         self.img_dir = os.path.join(root_dir, "img")
         self.mask_dir = os.path.join(root_dir, "masks_machine")
@@ -46,16 +45,24 @@ class ToothDataset(Dataset):
         random.seed(42)
         random.shuffle(all_images)
 
+        # =============================
+        # SPLIT 80 / 10 / 10
+        # =============================
         n_total = len(all_images)
         n_train = int(0.8 * n_total)
 
         if split == "train":
             self.image_list = all_images[:n_train]
-        else:
+
+        elif split == "val":
+            # Lấy toàn bộ phần còn lại (tương đương 20%)
             self.image_list = all_images[n_train:]
 
+        else:
+            raise ValueError("split must be 'train' or 'val'")
+
         # =============================
-        # SAMPLE WEIGHTS (Weighted Sampler)
+        # SAMPLE WEIGHTS (train only)
         # =============================
         if split == "train":
             self.sample_weights = [
@@ -98,6 +105,7 @@ class ToothDataset(Dataset):
             ])
 
         else:
+            # val/test → không augment random
             self.transform = A.Compose([
                 A.Resize(img_size, img_size),
                 A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
@@ -105,6 +113,9 @@ class ToothDataset(Dataset):
                 ToTensorV2()
             ])
 
+        # =============================
+        # LOG
+        # =============================
         print(f"✓ Loaded {len(self.image_list)} {split} samples")
 
         if split == "train":
@@ -131,19 +142,19 @@ class ToothDataset(Dataset):
         img_path = os.path.join(self.img_dir, img_name)
         mask_path = os.path.join(self.mask_dir, mask_name)
 
-        # ---- Load grayscale image ----
+        # ---- Load grayscale ----
         image = np.array(Image.open(img_path).convert("L"), dtype=np.uint8)
         mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
 
-        # ---- Binary mask (0 / 1) ----
+        # ---- Binary mask ----
         mask = (mask > 0).astype(np.uint8)
 
         transformed = self.transform(image=image, mask=mask)
 
-        image = transformed["image"]      # (1, H, W)
-        mask = transformed["mask"]        # (H, W)
+        image = transformed["image"]   # (1, H, W)
+        mask = transformed["mask"]     # (H, W)
 
-        # đảm bảo có channel dimension
+        # đảm bảo có channel
         if image.ndim == 2:
             image = image.unsqueeze(0)
 

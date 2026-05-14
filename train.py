@@ -7,11 +7,13 @@ Features
 - Early stopping
 - Model checkpointing
 - Weighted sampling for broken teeth
+- Inference speed benchmark (FPS + ms/image)
 """
 
 import argparse
 import os
 import random
+import time
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -66,7 +68,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device,
 
         scaler.scale(loss).backward()
 
-        # Gradient clipping
+        # ===== Gradient clipping =====
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
@@ -137,6 +139,88 @@ def validate(model, loader, criterion, device):
 
 
 # ======================================================
+# BENCHMARK
+# ======================================================
+
+@torch.no_grad()
+def benchmark_model(model, device, img_size=512, repetitions=100):
+
+    print("\n" + "="*60)
+    print("⚡ INFERENCE SPEED BENCHMARK")
+
+    model.eval()
+
+    dummy_input = torch.randn(
+        1, 1, img_size, img_size
+    ).to(device)
+
+    # ===== Warmup GPU =====
+    for _ in range(20):
+        _ = model(dummy_input)
+
+    # ===== Benchmark =====
+    if device.type == "cuda":
+
+        starter = torch.cuda.Event(enable_timing=True)
+        ender = torch.cuda.Event(enable_timing=True)
+
+        timings = []
+
+        for _ in range(repetitions):
+
+            starter.record()
+
+            _ = model(dummy_input)
+
+            ender.record()
+
+            torch.cuda.synchronize()
+
+            curr_time = starter.elapsed_time(ender)
+            timings.append(curr_time)
+
+        avg_time = np.mean(timings)
+
+        gpu_name = torch.cuda.get_device_name(0)
+
+        peak_memory = (
+            torch.cuda.max_memory_allocated() / 1024**3
+        )
+
+    else:
+
+        timings = []
+
+        for _ in range(repetitions):
+
+            start = time.time()
+
+            _ = model(dummy_input)
+
+            end = time.time()
+
+            timings.append((end - start) * 1000)
+
+        avg_time = np.mean(timings)
+
+        gpu_name = "CPU"
+        peak_memory = 0
+
+    fps = 1000.0 / avg_time
+
+    print(f"Device                : {gpu_name}")
+    print(f"Inference Time/Image  : {avg_time:.2f} ms")
+    print(f"FPS                   : {fps:.2f}")
+
+    if device.type == "cuda":
+        print(f"Peak VRAM             : {peak_memory:.2f} GB")
+
+    print("="*60)
+
+    return avg_time, fps
+
+
+# ======================================================
 # MAIN
 # ======================================================
 
@@ -146,21 +230,25 @@ def main():
 
     parser.add_argument('--data_path', type=str, default='./data/d2')
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=200)
+
+    # ===== CHỈNH 90 EPOCH =====
+    parser.add_argument('--epochs', type=int, default=90)
+
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--img_size', type=int, default=512)
     parser.add_argument('--save_dir', type=str, default='./checkpoints')
 
     parser.add_argument('--warmup_epochs', type=int, default=10)
-    parser.add_argument('--early_stop_patience', type=int, default=40)
+    parser.add_argument('--early_stop_patience', type=int, default=25)
 
     parser.add_argument('--embed_dim', type=int, default=32)
     parser.add_argument('--depths', type=int, nargs='+', default=[2,2,2,1])
 
     args = parser.parse_args()
 
-
-    # ===== Setup =====
+    # ======================================================
+    # SETUP
+    # ======================================================
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -181,22 +269,41 @@ def main():
         cudnn.benchmark = True
         cudnn.deterministic = False
 
-
     print("=" * 80)
     print(" MAMBA-UNET OPTIMIZED TRAINING")
     print(f"Device: {device}")
     print("=" * 80)
 
-
     # ======================================================
     # DATASET
     # ======================================================
 
-    train_ds = ToothDataset(args.data_path, "train", args.img_size, augment=True)
-    val_ds   = ToothDataset(args.data_path, "val", args.img_size, augment=False)
+    train_ds = ToothDataset(
+        args.data_path,
+        "train",
+        args.img_size,
+        augment=True
+    )
 
+    val_ds = ToothDataset(
+        args.data_path,
+        "val",
+        args.img_size,
+        augment=False
+    )
 
-    # ===== Weighted Sampler =====
+    total_images = len(train_ds) + len(val_ds)
+
+    print("\n" + "="*60)
+    print("📊 DATASET SPLIT SUMMARY")
+    print(f"Total images : {total_images}")
+    print(f"Train        : {len(train_ds)} ({len(train_ds)/total_images*100:.1f}%)")
+    print(f"Validation   : {len(val_ds)} ({len(val_ds)/total_images*100:.1f}%)")
+    print("="*60)
+
+    # ======================================================
+    # DATALOADER
+    # ======================================================
 
     if hasattr(train_ds, "sample_weights"):
 
@@ -215,7 +322,9 @@ def main():
             persistent_workers=True
         )
 
-        n_broken = sum(1 for w in train_ds.sample_weights if w > 1)
+        n_broken = sum(
+            1 for w in train_ds.sample_weights if w > 1
+        )
 
         print(f"Broken samples in train: {n_broken}")
 
@@ -230,7 +339,6 @@ def main():
             persistent_workers=True
         )
 
-
     val_loader = DataLoader(
         val_ds,
         batch_size=1,
@@ -239,9 +347,7 @@ def main():
         pin_memory=True
     )
 
-
     print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
-
 
     # ======================================================
     # MODEL
@@ -255,9 +361,11 @@ def main():
         embed_dim=args.embed_dim
     ).to(device)
 
+    total_params = (
+        sum(p.numel() for p in model.parameters()) / 1e6
+    )
 
-    print(f"Total params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
-
+    print(f"Total params: {total_params:.2f}M")
 
     # ======================================================
     # OPTIMIZER
@@ -271,19 +379,16 @@ def main():
         weight_decay=0.01
     )
 
-
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, args.epochs - args.warmup_epochs),
         eta_min=args.lr * 0.01
     )
 
-
     scaler = GradScaler()
 
     best_dice = 0
     patience_counter = 0
-
 
     history = {
         "train_loss": [],
@@ -293,7 +398,6 @@ def main():
         "val_dice": [],
         "val_iou": []
     }
-
 
     # ======================================================
     # TRAIN LOOP
@@ -325,13 +429,10 @@ def main():
         val_dice = val_metrics["dice"]
         val_iou  = val_metrics["iou"]
 
-
         if epoch > args.warmup_epochs:
             scheduler.step()
 
-
         print(f"Val Dice: {val_dice:.4f}")
-
 
         history["train_loss"].append(train_loss)
         history["train_dice"].append(train_dice)
@@ -341,8 +442,7 @@ def main():
         history["val_dice"].append(val_dice)
         history["val_iou"].append(val_iou)
 
-
-        # ===== Save best =====
+        # ===== Save Best =====
 
         if val_dice > best_dice:
 
@@ -365,41 +465,107 @@ def main():
                 print("🛑 EARLY STOPPING")
                 break
 
+    # ======================================================
+    # FINAL VALIDATION
+    # ======================================================
+
+    final_loss, final_metrics = validate(
+        model,
+        val_loader,
+        criterion,
+        device
+    )
+
+    print("\n" + "="*60)
+    print("📊 FINAL METRICS")
+
+    print(f"Loss   : {final_loss:.4f}")
+    print(f"Dice   : {final_metrics['dice']:.4f}")
+    print(f"IoU    : {final_metrics['iou']:.4f}")
+    print(f"Recall : {final_metrics['recall']:.4f}")
+    print(f"Spec   : {final_metrics['specificity']:.4f}")
+    print(f"Params : {total_params:.2f}M")
+
+    print("="*60)
+
+    # ======================================================
+    # INFERENCE BENCHMARK
+    # ======================================================
+
+    avg_time, fps = benchmark_model(
+        model,
+        device,
+        args.img_size
+    )
 
     # ======================================================
     # SAVE TRAINING CURVES
     # ======================================================
 
-    plot_path = os.path.join(save_dir, "training_curves_full.png")
+    plot_path = os.path.join(
+        save_dir,
+        "training_curves_full.png"
+    )
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 15), sharex=True)
+    fig, axes = plt.subplots(
+        3, 1,
+        figsize=(12, 15),
+        sharex=True
+    )
 
-    epochs_range = range(1, len(history["train_loss"]) + 1)
+    epochs_range = range(
+        1,
+        len(history["train_loss"]) + 1
+    )
 
+    # ===== LOSS =====
+    axes[0].plot(
+        epochs_range,
+        history["train_loss"],
+        label="Train Loss"
+    )
 
-    # Loss
-    axes[0].plot(epochs_range, history["train_loss"], label="Train Loss")
-    axes[0].plot(epochs_range, history["val_loss"], label="Val Loss")
+    axes[0].plot(
+        epochs_range,
+        history["val_loss"],
+        label="Val Loss"
+    )
 
     axes[0].set_title("Loss over Epochs")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
     axes[0].grid(True)
 
+    # ===== DICE =====
+    axes[1].plot(
+        epochs_range,
+        history["train_dice"],
+        label="Train Dice"
+    )
 
-    # Dice
-    axes[1].plot(epochs_range, history["train_dice"], label="Train Dice")
-    axes[1].plot(epochs_range, history["val_dice"], label="Val Dice")
+    axes[1].plot(
+        epochs_range,
+        history["val_dice"],
+        label="Val Dice"
+    )
 
     axes[1].set_title("Dice over Epochs")
     axes[1].set_ylabel("Dice")
     axes[1].legend()
     axes[1].grid(True)
 
+    # ===== IOU =====
+    axes[2].plot(
+        epochs_range,
+        history["train_iou"],
+        label="Train IoU"
+    )
 
-    # IoU
-    axes[2].plot(epochs_range, history["train_iou"], label="Train IoU")
-    axes[2].plot(epochs_range, history["val_iou"], label="Val IoU")
+    axes[2].plot(
+        epochs_range,
+        history["val_iou"],
+        label="Val IoU"
+    )
 
     axes[2].set_title("IoU over Epochs")
     axes[2].set_xlabel("Epoch")
@@ -407,20 +573,26 @@ def main():
     axes[2].legend()
     axes[2].grid(True)
 
-
     fig.suptitle(
         f"Training Summary - Best Val Dice: {best_dice:.4f}",
         fontsize=16
     )
 
     plt.tight_layout(rect=[0,0,1,0.96])
-    plt.savefig(plot_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
+    plt.savefig(
+        plot_path,
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
 
     print(f"\n📊 Training curves saved to: {plot_path}")
     print("Training completed.")
     print(f"Best Dice: {best_dice:.4f}")
+    print(f"FPS: {fps:.2f}")
+    print(f"Inference Time: {avg_time:.2f} ms/image")
 
 
 if __name__ == "__main__":
