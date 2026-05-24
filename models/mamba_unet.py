@@ -203,8 +203,8 @@ def create_mamba_unet(
     in_chans=1, 
     num_classes=2, 
     img_size=512,
-    embed_dim=96,         
-    depths=[2, 2, 2, 2],   
+    embed_dim=32,         
+    depths=[2, 2, 2, 1],   
     drop_path_rate=0.2,
     patch_size=4
     ):

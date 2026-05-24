@@ -111,7 +111,7 @@ def validate(model, loader, criterion, device):
     total_loss = 0
     metrics_sum = None
 
-    for images, masks in tqdm(loader, desc="Validation"):
+    for images, masks in tqdm(loader, desc="Validation", leave=False):
 
         images = images.to(device)
         masks = masks.to(device)
@@ -132,7 +132,6 @@ def validate(model, loader, criterion, device):
                 metrics_sum[k] += metrics[k]
 
     n = len(loader)
-
     avg_metrics = {k: v / n for k, v in metrics_sum.items()}
 
     return total_loss / n, avg_metrics
@@ -143,10 +142,11 @@ def validate(model, loader, criterion, device):
 # ======================================================
 
 @torch.no_grad()
-def benchmark_model(model, device, img_size=512, repetitions=100):
+def benchmark_model(model, device, img_size=512, repetitions=100, is_final=False):
 
+    prefix = "🏆 FINAL " if is_final else "⚡ "
     print("\n" + "="*60)
-    print("⚡ INFERENCE SPEED BENCHMARK")
+    print(f"{prefix}INFERENCE SPEED BENCHMARK")
 
     model.eval()
 
@@ -356,9 +356,9 @@ def main():
     model = create_mamba_unet(
         in_chans=1,
         num_classes=2,
-        img_size=args.img_size,
-        depths=args.depths,
-        embed_dim=args.embed_dim
+        img_size=512,
+        depths=[2,2,2,1],
+        embed_dim=32
     ).to(device)
 
     total_params = (
@@ -432,7 +432,20 @@ def main():
         if epoch > args.warmup_epochs:
             scheduler.step()
 
-        print(f"Val Dice: {val_dice:.4f}")
+        # ===== ĐỊNH DẠNG IN CHỈ SỐ THEO EPOCH =====
+        print("\n" + "="*60)
+        print(f"🏆 METRICS FOR EPOCH {epoch}")
+        print(f"Loss        : {val_loss:.4f}")
+        print(f"Dice        : {val_dice:.4f}")
+        print(f"IoU         : {val_iou:.4f}")
+        print(f"Recall      : {val_metrics.get('recall', 0.0):.4f}")
+        print(f"Spec        : {val_metrics.get('specificity', 0.0):.4f}")
+        print(f"Accuracy    : {val_metrics.get('accuracy', 0.0):.4f}")
+        print(f"Precision   : {val_metrics.get('precision', 0.0):.4f}")
+        print(f"F1-score    : {val_metrics.get('f1', val_dice):.4f}")  # Thường F1 tương đương Dice
+        print(f"ROC-AUC     : {val_metrics.get('auc', 0.0):.4f}")
+        print(f"Params      : {total_params:.2f}M")
+        print("="*60)
 
         history["train_loss"].append(train_loss)
         history["train_dice"].append(train_dice)
@@ -466,8 +479,12 @@ def main():
                 break
 
     # ======================================================
-    # FINAL VALIDATION
+    # FINAL VALIDATION (Load best checkpoint if available)
     # ======================================================
+    best_path = os.path.join(save_dir, "best.pth")
+    if os.path.exists(best_path):
+        model.load_state_dict(torch.load(best_path))
+        print("\nLoaded best checkpoint for final evaluation.")
 
     final_loss, final_metrics = validate(
         model,
@@ -477,15 +494,17 @@ def main():
     )
 
     print("\n" + "="*60)
-    print("📊 FINAL METRICS")
-
-    print(f"Loss   : {final_loss:.4f}")
-    print(f"Dice   : {final_metrics['dice']:.4f}")
-    print(f"IoU    : {final_metrics['iou']:.4f}")
-    print(f"Recall : {final_metrics['recall']:.4f}")
-    print(f"Spec   : {final_metrics['specificity']:.4f}")
-    print(f"Params : {total_params:.2f}M")
-
+    print("🏆 FINAL METRICS (Calculated on Best Checkpoint)")
+    print(f"Loss        : {final_loss:.4f}")
+    print(f"Dice        : {final_metrics['dice']:.4f}")
+    print(f"IoU         : {final_metrics['iou']:.4f}")
+    print(f"Recall      : {final_metrics.get('recall', 0.0):.4f}")
+    print(f"Spec        : {final_metrics.get('specificity', 0.0):.4f}")
+    print(f"Accuracy    : {final_metrics.get('accuracy', 0.0):.4f}")
+    print(f"Precision   : {final_metrics.get('precision', 0.0):.4f}")
+    print(f"F1-score    : {final_metrics.get('f1', final_metrics['dice']):.4f}")
+    print(f"ROC-AUC     : {final_metrics.get('auc', 0.0):.4f}")
+    print(f"Params      : {total_params:.2f}M")
     print("="*60)
 
     # ======================================================
@@ -495,7 +514,8 @@ def main():
     avg_time, fps = benchmark_model(
         model,
         device,
-        args.img_size
+        args.img_size,
+        is_final=True
     )
 
     # ======================================================
@@ -590,9 +610,6 @@ def main():
 
     print(f"\n📊 Training curves saved to: {plot_path}")
     print("Training completed.")
-    print(f"Best Dice: {best_dice:.4f}")
-    print(f"FPS: {fps:.2f}")
-    print(f"Inference Time: {avg_time:.2f} ms/image")
 
 
 if __name__ == "__main__":
